@@ -45,6 +45,65 @@ async def rag_ingest_pdf(ctx: inngest.Context):
     ingested = await ctx.step.run("embed-and-upsert", lambda: _upsert(chunks_and_src), output_type=RAGUpsertResult)
     return ingested.model_dump()
 
+@inngest_client.create_function(
+    fn_id = "RAG: Query PDF",
+    trigger = inngest.TriggerEvent(event = "rag/query_pdf_ai")
+)
+
+async def rag_query_pdf_ai(ctx: inngest.Context) -> RAGSearchResult:
+    def _search(question: str, top_k: int = 5):
+        query_vec = embed_texts([question])[0]
+        store = QdrantStorage()
+        found = store.search(query_vec, top_k=top_k)
+        return RAGSearchResult(contexts=found["contexts"], sources=found["sources"])
+
+    question = ctx.event.data["question"]
+    top_k = ctx.event.data.get("top_k", 5)
+
+    found = await ctx.step.run("embed-and-search", lambda: _search(question, top_k), output_type=RAGSearchResult)
+
+    context_block = "\n\n".join(f"- {c}" for c in found.contexts)
+    user_content = (
+        "Use the following context to answer the question.\n\n"
+        f"Context:\n{context_block}\n\n"
+        f"Question:\n{question}\n\n"
+        "Answer concisely using the context above."
+    )
+
+    adapter = ai.openai.Adapter(
+        auth_key=os.environ["GEMINI_API_KEY"],
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        model="gemini-3.8-flash",
+    )
+
+    res = await ctx.step.ai.infer(
+        "llm-answer",
+        adapter=adapter,
+        body={
+            "max_tokens": 1024,
+            "temperature": 0.2,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "You answer questions using only the provided context.",
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": user_content}],
+                },
+            ]
+        }
+    )
+
+    answer = res["choices"][0]["message"]["content"].strip()
+    return {"answer": answer, "sources": found.sources, "num_contexts": len(found.contexts)}
+
+
 app = FastAPI()
 
-inngest.fast_api.serve(app, inngest_client, functions=[rag_ingest_pdf])
+inngest.fast_api.serve(app, inngest_client, functions=[rag_ingest_pdf, rag_query_pdf_ai])
