@@ -24,5 +24,8 @@ dist/
 .coverage
 htmlcov/
 
+# Local vector database storage
+qdrant_storage/
+
 # macOS
 .DS_Store
